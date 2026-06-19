@@ -1,5 +1,7 @@
 # napplet-people-radar
 
+[![CI](https://github.com/hyprgate/napplet-people-radar/actions/workflows/ci.yml/badge.svg)](https://github.com/hyprgate/napplet-people-radar/actions/workflows/ci.yml)
+
 Forkable source repository for the Hyprgate built-in napplet currently packaged as `@hyprgate/napp-people-radar`.
 
 This repository was split from `hyprgate/gui` and is mounted back into the parent checkout as `napplets/people-radar`.
@@ -13,3 +15,18 @@ cd gui
 pnpm install --frozen-lockfile
 pnpm --filter @hyprgate/napp-people-radar build
 ```
+
+## Testing
+
+Run these checks from a Hyprgate parent checkout so workspace dependencies resolve:
+
+```bash
+git clone --recurse-submodules git@github.com:hyprgate/gui.git
+cd gui
+pnpm install --frozen-lockfile
+pnpm --filter @hyprgate/napp-people-radar conformance
+pnpm --filter @hyprgate/napp-people-radar test
+pnpm --filter @hyprgate/napp-people-radar build
+```
+
+The `conformance` script builds the napplet and runs `@napplet/conformance-cli` against `dist/`. CI runs the same conformance, unit test, and build checks for every push and pull request.

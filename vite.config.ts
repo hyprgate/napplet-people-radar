@@ -8,7 +8,7 @@ export default defineConfig({
     svelte(),
     nip5aManifest({
       nappletType: 'people-radar',
-      requires: ['identity', 'relay', 'ifc', 'storage'],
+      requires: ['identity', 'relay', 'inc', 'storage', 'theme'],
       artifactMode: 'single-file',
     }),
   ],
