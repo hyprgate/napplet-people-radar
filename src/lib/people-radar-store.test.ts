@@ -174,7 +174,7 @@ describe('people radar store load() outbox gating', () => {
     expect(store.state.loading).toBe(true);
 
     // Kind-0 metadata for a known follow updates that person's name.
-    subs[0]!.emit('event', {
+    subs[0]!.emit('event', { event: {
       id: 'meta1',
       kind: 0,
       pubkey: 'f1',
@@ -182,10 +182,10 @@ describe('people radar store load() outbox gating', () => {
       tags: [],
       content: JSON.stringify({ name: 'Felix' }),
       sig: 'sig',
-    });
+    } });
     expect(store.state.people.find((p) => p.pubkey === 'f1')?.name).toBe('Felix');
 
-    subs[0]!.emit('eose');
+    subs[0]!.emit('closed');
     expect(store.state.loading).toBe(false);
   });
 

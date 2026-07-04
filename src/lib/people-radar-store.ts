@@ -120,14 +120,14 @@ function subscribe(
 
   if (useOutbox) {
     // The shell owns NIP-65 relay selection; no relayHint needed on the fetch.
-    const outboxSub = outbox.subscribe(filter, { strategy: 'outbox' });
-    outboxSub.on('event', (event) => handleEvent(event as NostrEvent));
-    outboxSub.on('eose', handleEose);
+    const outboxSub = outbox.subscribe(filter, { strategy: 'outbox', live: false });
+    outboxSub.on('event', (result) => handleEvent(result.event as NostrEvent));
+    outboxSub.on('closed', handleEose);
     ctx.subs.push({ close: () => outboxSub.close() });
     return;
   }
 
-  const sub = relay.subscribe(filter, handleEvent, handleEose);
+  const sub = relay.subscribe(filter, (result) => handleEvent(result.event as NostrEvent), handleEose);
   ctx.subs.push(sub);
 }
 
