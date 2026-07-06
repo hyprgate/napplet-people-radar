@@ -17,6 +17,7 @@ vi.mock('@napplet/sdk', () => ({
   },
   outbox: {
     subscribe: vi.fn(),
+    query: vi.fn(),
   },
   identity: {
     getPublicKey: vi.fn().mockResolvedValue('self'),
@@ -29,27 +30,7 @@ import { identity, outbox, relay } from '@napplet/sdk';
 
 const mockRelaySubscribe = vi.mocked(relay.subscribe);
 const mockOutboxSubscribe = vi.mocked(outbox.subscribe);
-
-interface FakeOutboxSub {
-  close: ReturnType<typeof vi.fn>;
-  handlers: Record<string, ((...args: unknown[]) => void) | undefined>;
-  on: (event: string, cb: (...args: unknown[]) => void) => void;
-  emit: (event: string, ...args: unknown[]) => void;
-}
-
-function makeOutboxSub(): FakeOutboxSub {
-  const sub: FakeOutboxSub = {
-    close: vi.fn(),
-    handlers: {},
-    on(event, cb) {
-      this.handlers[event] = cb;
-    },
-    emit(event, ...args) {
-      this.handlers[event]?.(...args);
-    },
-  };
-  return sub;
-}
+const mockOutboxQuery = vi.mocked(outbox.query);
 
 function installShell(supportsOutbox: boolean): { supports: ReturnType<typeof vi.fn> } {
   const supports = vi.fn((domain: string) => (domain === 'outbox' ? supportsOutbox : false));
@@ -129,64 +110,63 @@ describe('people radar store load() outbox gating', () => {
     vi.mocked(identity.getRelays).mockResolvedValue({
       'wss://relay.example': { read: true, write: true },
     });
+    mockOutboxQuery.mockResolvedValue({ events: [] });
   });
 
   afterEach(() => {
     delete (globalThis as unknown as { napplet?: unknown }).napplet;
   });
 
-  it('fetches kind-0 and kind-1 via outbox.subscribe(strategy:outbox) when supported', async () => {
+  it('fetches kind-0 and kind-1 via outbox.query when supported', async () => {
     installShell(true);
-    const subs = [makeOutboxSub(), makeOutboxSub()];
-    let i = 0;
-    mockOutboxSubscribe.mockImplementation(() => subs[i++] as unknown as ReturnType<typeof outbox.subscribe>);
 
     const store = createRadarStore();
     store.load();
-    await vi.waitFor(() => expect(mockOutboxSubscribe).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(mockOutboxQuery).toHaveBeenCalledTimes(2));
 
-    const kind0Call = mockOutboxSubscribe.mock.calls.find((c) => {
+    const kind0Call = mockOutboxQuery.mock.calls.find((c) => {
       const f = Array.isArray(c[0]) ? c[0][0] : c[0];
       return (f as { kinds?: number[] })?.kinds?.includes(0);
     });
-    const kind1Call = mockOutboxSubscribe.mock.calls.find((c) => {
+    const kind1Call = mockOutboxQuery.mock.calls.find((c) => {
       const f = Array.isArray(c[0]) ? c[0][0] : c[0];
       return (f as { kinds?: number[] })?.kinds?.includes(1);
     });
     expect(kind0Call).toBeDefined();
     expect(kind1Call).toBeDefined();
-    expect(kind0Call![1]).toEqual(expect.objectContaining({ strategy: 'outbox' }));
-    expect(kind1Call![1]).toEqual(expect.objectContaining({ strategy: 'outbox' }));
 
     // Fetch must NOT use relay.subscribe when outbox is supported.
     expect(mockRelaySubscribe).not.toHaveBeenCalled();
+    expect(mockOutboxSubscribe).not.toHaveBeenCalled();
   });
 
-  it('routes outbox events through the same handlers and flips loading on eose', async () => {
+  it('routes outbox query events through the same handlers and flips loading on completion', async () => {
     installShell(true);
-    const subs = [makeOutboxSub(), makeOutboxSub()];
-    let i = 0;
-    mockOutboxSubscribe.mockImplementation(() => subs[i++] as unknown as ReturnType<typeof outbox.subscribe>);
+    mockOutboxQuery.mockImplementation(async (filter) => {
+      const f = Array.isArray(filter) ? filter[0] : filter;
+      if ((f as { kinds?: number[] })?.kinds?.includes(0)) {
+        return {
+          events: [{
+            event: {
+              id: 'meta1',
+              kind: 0,
+              pubkey: 'f1',
+              created_at: 10,
+              tags: [],
+              content: JSON.stringify({ name: 'Felix' }),
+              sig: 'sig',
+            },
+          }],
+        };
+      }
+      return { events: [] };
+    });
 
     const store = createRadarStore();
     store.load();
-    await vi.waitFor(() => expect(mockOutboxSubscribe).toHaveBeenCalledTimes(2));
-    expect(store.state.loading).toBe(true);
-
-    // Kind-0 metadata for a known follow updates that person's name.
-    subs[0]!.emit('event', { event: {
-      id: 'meta1',
-      kind: 0,
-      pubkey: 'f1',
-      created_at: 10,
-      tags: [],
-      content: JSON.stringify({ name: 'Felix' }),
-      sig: 'sig',
-    } });
+    await vi.waitFor(() => expect(mockOutboxQuery).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(store.state.loading).toBe(false));
     expect(store.state.people.find((p) => p.pubkey === 'f1')?.name).toBe('Felix');
-
-    subs[0]!.emit('closed');
-    expect(store.state.loading).toBe(false);
   });
 
   it('falls back to relay.subscribe when outbox is unsupported', async () => {
@@ -196,7 +176,7 @@ describe('people radar store load() outbox gating', () => {
     store.load();
     await vi.waitFor(() => expect(mockRelaySubscribe).toHaveBeenCalledTimes(2));
 
-    expect(mockOutboxSubscribe).not.toHaveBeenCalled();
+    expect(mockOutboxQuery).not.toHaveBeenCalled();
     const kinds = mockRelaySubscribe.mock.calls.map((c) => {
       const f = Array.isArray(c[0]) ? c[0][0] : c[0];
       return (f as { kinds?: number[] })?.kinds?.[0];
@@ -207,11 +187,10 @@ describe('people radar store load() outbox gating', () => {
 
   it('still seeds relayHint onto people for display/search', async () => {
     installShell(true);
-    mockOutboxSubscribe.mockImplementation(() => makeOutboxSub() as unknown as ReturnType<typeof outbox.subscribe>);
 
     const store = createRadarStore();
     store.load();
-    await vi.waitFor(() => expect(mockOutboxSubscribe).toHaveBeenCalled());
+    await vi.waitFor(() => expect(mockOutboxQuery).toHaveBeenCalled());
 
     const follow = store.state.people.find((p) => p.pubkey === 'f1');
     expect(follow?.relayHint).toBe('wss://relay.example');
