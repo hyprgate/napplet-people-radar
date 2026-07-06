@@ -16,7 +16,6 @@
   "dependencies": {
     "@hyprgate/utils": "workspace:*",
     "@napplet/sdk": "0.24.1",
-    "@napplet/shim": "0.26.3",
     "svelte": "^5.54.1"
   },
   "devDependencies": {

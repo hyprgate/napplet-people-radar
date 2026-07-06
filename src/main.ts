@@ -1,5 +1,3 @@
-import '@napplet/shim';
-
 import { installBuiltInThemeClient } from '@hyprgate/utils';
 import { mount } from 'svelte';
 import App from './App.svelte';
