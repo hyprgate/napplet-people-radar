@@ -1,11 +1,18 @@
-import type { NostrEvent } from '@hyprgate/types';
+import {
+  createIntentRequest,
+  parseIntentResult,
+  type IntentRequest,
+  type IntentRequestOptions,
+  type IntentResult,
+  type NostrEvent,
+} from '@hyprgate/types';
 import {
   KIND_GENERIC_REPOST,
   KIND_NOTE,
   KIND_REACTION,
   KIND_REPOST,
 } from '@hyprgate/types';
-import { nip19 } from 'nostr-tools';
+import * as nip19 from 'nostr-tools/nip19';
 
 export const NOTE_VIEWER_OPEN_TOPIC = 'note:open' as const;
 export const NOTE_VIEWER_READY_TOPIC = 'note:ready' as const;
@@ -170,6 +177,20 @@ export function createNoteViewerOpenPayload(input: NoteViewerOpenPayload): NoteV
     ...(input.source !== undefined ? { source: input.source } : {}),
     ...(input.behavior !== undefined ? { behavior: input.behavior } : {}),
   };
+}
+
+/** Build a validated note request while leaving action and convention independent. */
+export function createNoteViewerOpenIntentRequest(
+  payload: NoteViewerOpenPayload,
+  options: IntentRequestOptions = {},
+): IntentRequest | null {
+  const note = createNoteViewerOpenPayload(payload);
+  return note ? createIntentRequest({ archetype: 'note', ...options, payload: note }) : null;
+}
+
+/** Parse a canonical note result so consumers keep explicit no-handler outcomes. */
+export function parseNoteViewerOpenIntentResult(value: unknown): IntentResult | null {
+  return parseIntentResult(value);
 }
 
 export function isNoteViewerOpenPayload(value: unknown): value is NoteViewerOpenPayload {

@@ -1,7 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { inc as ipc } from '@napplet/sdk';
-  import { NOTE_VIEWER_OPEN_TOPIC, createNoteViewerOpenPayload, pubkeyColorStyle } from '@hyprgate/utils';
+  import { intent } from '@napplet/sdk';
+  import { parseIntentResult, type IntentRequest } from '@hyprgate/types';
+  import {
+    createNoteViewerOpenIntentRequest,
+    createNoteViewerOpenPayload,
+    createProfileIntentRequest,
+    pubkeyColorStyle,
+  } from '@hyprgate/utils';
   import {
     createRadarStore,
     latestActivity,
@@ -33,11 +39,22 @@
     store.setQuery(value);
   }
 
-  function openProfile(person: RadarPerson): void {
-    ipc.emit('profile:open', [], JSON.stringify({ pubkey: person.pubkey }));
+  async function invokeNavigation(request: IntentRequest | null): Promise<void> {
+    if (!request) return;
+    try {
+      const result = parseIntentResult(await intent.invoke(request));
+      if (!result || result.archetype !== request.archetype || result.action !== (request.action ?? 'open')) return;
+      if (!result.ok || !result.handled) return;
+    } catch {
+      // Keep the existing no-op behavior when navigation is unavailable.
+    }
   }
 
-  function openLatestNote(person: RadarPerson): void {
+  async function openProfile(person: RadarPerson): Promise<void> {
+    await invokeNavigation(createProfileIntentRequest({ pubkey: person.pubkey }));
+  }
+
+  async function openLatestNote(person: RadarPerson): Promise<void> {
     const latest = latestActivity(person);
     if (!latest) return;
     const payload = createNoteViewerOpenPayload({
@@ -45,7 +62,7 @@
       source: { napplet: 'people-radar' },
       behavior: { focus: true, newWindow: true },
     });
-    if (payload) ipc.emit(NOTE_VIEWER_OPEN_TOPIC, [], JSON.stringify(payload));
+    await invokeNavigation(payload ? createNoteViewerOpenIntentRequest(payload, { behavior: payload.behavior }) : null);
   }
 </script>
 
