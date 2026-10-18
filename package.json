@@ -16,14 +16,14 @@
   "dependencies": {
     "@hyprgate/types": "workspace:*",
     "@hyprgate/utils": "workspace:*",
-    "@napplet/sdk": "0.27.2",
+    "@napplet/sdk": "0.30.0",
     "svelte": "^5.54.1"
   },
   "devDependencies": {
-    "@kehto/cli": "^0.4.1",
-    "@napplet/conformance": "^0.16.2",
-    "@napplet/conformance-cli": "^0.2.18",
-    "@napplet/vite-plugin": "0.14.1",
+    "@kehto/cli": "0.5.5",
+    "@napplet/conformance": "0.20.1",
+    "@napplet/conformance-cli": "0.3.4",
+    "@napplet/vite-plugin": "0.16.1",
     "@sveltejs/vite-plugin-svelte": "^7.0.0",
     "jsdom": "^26.1.0",
     "typescript": "^5.9.3",
