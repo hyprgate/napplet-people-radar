@@ -9,8 +9,8 @@ export default defineConfig({
     svelte(),
     nip5aManifest({
       nappletType: 'people-radar',
-      requires: ['identity', 'relay', 'inc', 'storage'],
-      optional: ['theme'],
+      requires: ['identity', 'relay', 'inc', 'storage', 'intent', 'common', 'resource'],
+      optional: ['theme', 'outbox'],
       icon: { data: readFileSync(new URL('./icon.png', import.meta.url)), mimeType: 'image/png' },
       artifactMode: 'single-file',
     }),

@@ -1,4 +1,4 @@
-import { identity, outbox, relay, type Subscription } from "@napplet/sdk";
+import { common, identity, outbox, relay, type Subscription } from "@napplet/sdk";
 
 /** Minimal shape of the shim-installed shell handshake we depend on. */
 interface NappletShellHandle {
@@ -30,7 +30,10 @@ interface NostrFilter {
   [key: `#${string}`]: string[] | undefined;
 }
 
-export type RelationshipStatus = 'following' | 'muted' | 'pinned' | 'list';
+/** Enough for a busy poster not to crowd everyone else out of one shared query. */
+const NOTES_PER_PERSON = 8;
+
+export type RelationshipStatus = 'you' | 'following';
 
 export interface RadarActivity {
   id: string;
@@ -42,11 +45,15 @@ export interface RadarActivity {
 
 export interface RadarPerson {
   pubkey: string;
+  /** Best-effort label: profile name, then the short npub. */
   name: string;
+  /** False until a profile gives this person a real name. */
+  named: boolean;
+  /** NIP-05 when the profile has one. */
   handle: string;
-  relayHint: string;
+  npub: string;
+  picture: string;
   relationship: RelationshipStatus;
-  list: string;
   recent: RadarActivity[];
 }
 
@@ -71,6 +78,7 @@ interface ProfileContent {
   display_name?: string;
   displayName?: string;
   nip05?: string;
+  picture?: string;
 }
 
 export function createInitialRadarState(): RadarState {
@@ -86,12 +94,19 @@ export function createInitialRadarState(): RadarState {
 interface RadarContext {
   state: RadarState;
   people: Map<string, RadarPerson>;
+  profileTimes: Map<string, number>;
   subs: Subscription[];
   notify(): void;
 }
 
+/** Most recently active first; people with no notes last, by name. */
+function byMostRecent(a: RadarPerson, b: RadarPerson): number {
+  const latest = (person: RadarPerson) => person.recent[0]?.createdAt ?? 0;
+  return latest(b) - latest(a) || a.name.localeCompare(b.name);
+}
+
 function rebuild(ctx: RadarContext): void {
-  ctx.state.people = [...ctx.people.values()].sort((a, b) => b.recent.length - a.recent.length || a.name.localeCompare(b.name));
+  ctx.state.people = [...ctx.people.values()].sort(byMostRecent);
   if (!ctx.state.selectedPubkey || !ctx.people.has(ctx.state.selectedPubkey)) {
     ctx.state.selectedPubkey = ctx.state.people[0]?.pubkey ?? null;
   }
@@ -126,6 +141,7 @@ function subscribe(
         if (closed) return;
         for (const item of result.events) handleEvent(item.event as NostrEvent);
       })
+      .catch(() => { /* an unreachable rail leaves people listed without activity */ })
       .finally(() => {
         if (!closed) handleEose();
       });
@@ -137,15 +153,46 @@ function subscribe(
   ctx.subs.push(sub);
 }
 
+export function shortKey(key: string): string {
+  return key.length > 18 ? `${key.slice(0, 10)}…${key.slice(-6)}` : key;
+}
+
+function firstText(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
+}
+
 function applyProfile(ctx: RadarContext, event: NostrEvent): void {
   const person = ctx.people.get(event.pubkey);
-  if (!person) return;
+  if (!person || event.created_at < (ctx.profileTimes.get(event.pubkey) ?? 0)) return;
   try {
     const profile = JSON.parse(event.content) as ProfileContent;
-    person.name = profile.display_name ?? profile.displayName ?? profile.name ?? person.name;
-    person.handle = profile.nip05 ?? person.pubkey;
+    ctx.profileTimes.set(event.pubkey, event.created_at);
+    const label = firstText(profile.display_name, profile.displayName, profile.name, profile.nip05);
+    if (label) {
+      person.name = label;
+      person.named = true;
+    }
+    person.handle = firstText(profile.nip05);
+    person.picture = firstText(profile.picture);
   } catch {
     // Ignore malformed profile JSON.
+  }
+}
+
+/** Encoding is a host call, so people show up immediately and get their npub just after. */
+function encodeNpubs(ctx: RadarContext, pubkeys: string[]): void {
+  for (const pubkey of pubkeys) {
+    void Promise.resolve(common.encodeNip19({ type: 'npub', hex: pubkey })).then((result) => {
+      const person = ctx.people.get(pubkey);
+      if (!person || !result?.ok || !result.value) return;
+      person.npub = result.value;
+      if (!person.named) person.name = shortKey(result.value);
+      rebuild(ctx);
+      ctx.notify();
+    }).catch(() => { /* the short hex key stays usable */ });
   }
 }
 
@@ -155,7 +202,7 @@ function applyActivity(ctx: RadarContext, event: NostrEvent): void {
   person.recent = [{
     id: event.id,
     noteId: event.id,
-    label: `kind ${event.kind}`,
+    label: 'Note',
     summary: summarize(event.content),
     createdAt: event.created_at,
   }, ...person.recent]
@@ -163,15 +210,16 @@ function applyActivity(ctx: RadarContext, event: NostrEvent): void {
     .slice(0, 8);
 }
 
-function seedPeople(ctx: RadarContext, self: string, pubkeys: string[], relayHint: string): void {
+function seedPeople(ctx: RadarContext, self: string, pubkeys: string[]): void {
   for (const pubkey of pubkeys) {
     ctx.people.set(pubkey, {
       pubkey,
-      name: pubkey === self ? 'You' : pubkey.slice(0, 12),
-      handle: pubkey,
-      relayHint,
-      relationship: pubkey === self ? 'pinned' : 'following',
-      list: pubkey === self ? 'Self' : 'Follows',
+      name: shortKey(pubkey),
+      named: false,
+      handle: '',
+      npub: '',
+      picture: '',
+      relationship: pubkey === self ? 'you' : 'following',
       recent: [],
     });
   }
@@ -180,25 +228,23 @@ function seedPeople(ctx: RadarContext, self: string, pubkeys: string[], relayHin
 async function load(ctx: RadarContext): Promise<void> {
   destroyRadar(ctx);
   ctx.people.clear();
+  ctx.profileTimes.clear();
   ctx.state.loading = true;
   ctx.state.error = null;
   rebuild(ctx);
   ctx.notify();
 
   try {
-    const [self, follows, relays] = await Promise.all([
+    const [self, follows] = await Promise.all([
       identity.getPublicKey(),
       identity.getFollows().catch(() => []),
-      identity.getRelays().catch(() => ({} as Record<string, { read: boolean; write: boolean }>)),
     ]);
-    const pubkeys = Array.from(new Set([self, ...follows])).slice(0, 80);
-    // relayHint is kept for DISPLAY/search only — the fetch path no longer
-    // consumes it (the shell owns NIP-65 relay selection via outbox).
-    const relayHint = Object.entries(relays).find(([, mode]) => mode.read)?.[0] ?? '';
+    const pubkeys = Array.from(new Set([self, ...follows]));
 
-    seedPeople(ctx, self, pubkeys, relayHint);
+    seedPeople(ctx, self, pubkeys);
     rebuild(ctx);
     ctx.notify();
+    encodeNpubs(ctx, pubkeys);
 
     if (pubkeys.length === 0) {
       ctx.state.loading = false;
@@ -213,7 +259,7 @@ async function load(ctx: RadarContext): Promise<void> {
     const useOutbox = shell?.supports('outbox') ?? false;
 
     subscribe(ctx, { kinds: [0], authors: pubkeys, limit: pubkeys.length }, (event) => applyProfile(ctx, event), useOutbox);
-    subscribe(ctx, { kinds: [1], authors: pubkeys, limit: 160 }, (event) => applyActivity(ctx, event), useOutbox);
+    subscribe(ctx, { kinds: [1], authors: pubkeys, limit: Math.max(160, pubkeys.length * NOTES_PER_PERSON) }, (event) => applyActivity(ctx, event), useOutbox);
   } catch (error) {
     ctx.state.loading = false;
     ctx.state.error = error instanceof Error ? error.message : 'Unable to load people.';
@@ -225,6 +271,7 @@ export function createRadarStore(onUpdate?: () => void): RadarStore {
   const ctx: RadarContext = {
     state: createInitialRadarState(),
     people: new Map<string, RadarPerson>(),
+    profileTimes: new Map<string, number>(),
     subs: [],
     notify: () => onUpdate?.(),
   };
@@ -246,9 +293,9 @@ export function createRadarStore(onUpdate?: () => void): RadarStore {
 
 export function visiblePeople(state: RadarState): RadarPerson[] {
   const q = state.query.trim().toLowerCase();
-  const people = [...state.people].sort((a, b) => b.recent.length - a.recent.length || a.name.localeCompare(b.name));
+  const people = [...state.people].sort(byMostRecent);
   if (!q) return people;
-  return people.filter((person) => [person.name, person.handle, person.relayHint, person.relationship, person.list]
+  return people.filter((person) => [person.name, person.handle, person.npub, person.pubkey, ...person.recent.map((item) => item.summary)]
     .join(' ')
     .toLowerCase()
     .includes(q));
@@ -258,11 +305,17 @@ export function selectedPerson(state: RadarState): RadarPerson | null {
   return state.people.find((person) => person.pubkey === state.selectedPubkey) ?? visiblePeople(state)[0] ?? null;
 }
 
-export function relationshipCounts(people: RadarPerson[]): Record<RelationshipStatus, number> {
-  return people.reduce<Record<RelationshipStatus, number>>((counts, person) => {
-    counts[person.relationship] += 1;
-    return counts;
-  }, { following: 0, muted: 0, pinned: 0, list: 0 });
+export function radarSummary(people: RadarPerson[]): { people: number; active: number } {
+  return { people: people.length, active: people.filter((person) => person.recent.length > 0).length };
+}
+
+/** A short "how long ago". `createdAt` is in seconds. */
+export function timeAgo(createdAt: number, nowSeconds = Math.floor(Date.now() / 1_000)): string {
+  const seconds = Math.max(0, nowSeconds - createdAt);
+  if (seconds < 60) return 'just now';
+  if (seconds < 3_600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86_400) return `${Math.floor(seconds / 3_600)}h ago`;
+  return `${Math.floor(seconds / 86_400)}d ago`;
 }
 
 export function latestActivity(person: RadarPerson): RadarActivity | null {

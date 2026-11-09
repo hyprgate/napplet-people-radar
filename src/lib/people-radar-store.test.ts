@@ -3,8 +3,9 @@ import {
   createInitialRadarState,
   createRadarStore,
   latestActivity,
-  relationshipCounts,
+  radarSummary,
   selectedPerson,
+  timeAgo,
   visiblePeople,
   type RadarPerson,
 } from './people-radar-store';
@@ -18,6 +19,9 @@ vi.mock('@napplet/sdk', () => ({
   outbox: {
     subscribe: vi.fn(),
     query: vi.fn(),
+  },
+  common: {
+    encodeNip19: vi.fn(async ({ hex }: { hex: string }) => ({ ok: true, value: `npub1${hex}${'0'.repeat(20)}` })),
   },
   identity: {
     getPublicKey: vi.fn().mockResolvedValue('self'),
@@ -49,22 +53,24 @@ const people: RadarPerson[] = [
   {
     pubkey: 'a'.repeat(64),
     name: 'Alice',
+    named: true,
     handle: 'alice@example.com',
-    relayHint: 'wss://relay.example',
+    npub: 'npub1alice',
+    picture: '',
     relationship: 'following',
-    list: 'Follows',
-    recent: [{ id: 'old', noteId: '1'.repeat(64), label: 'kind 1', summary: 'old', createdAt: 1 }],
+    recent: [{ id: 'old', noteId: '1'.repeat(64), label: 'Note', summary: 'old', createdAt: 1 }],
   },
   {
     pubkey: 'b'.repeat(64),
     name: 'Bob',
+    named: true,
     handle: 'bob@example.com',
-    relayHint: '',
-    relationship: 'pinned',
-    list: 'Self',
+    npub: 'npub1bob',
+    picture: '',
+    relationship: 'you',
     recent: [
-      { id: 'old', noteId: '2'.repeat(64), label: 'kind 1', summary: 'old', createdAt: 1 },
-      { id: 'new', noteId: '3'.repeat(64), label: 'kind 1', summary: 'new', createdAt: 2 },
+      { id: 'old', noteId: '2'.repeat(64), label: 'Note', summary: 'old', createdAt: 1 },
+      { id: 'new', noteId: '3'.repeat(64), label: 'Note', summary: 'new', createdAt: 2 },
     ],
   },
 ];
@@ -74,11 +80,18 @@ describe('people radar store (pure helpers)', () => {
     expect(createInitialRadarState().people).toEqual([]);
   });
 
-  it('filters people by metadata and relay hints', () => {
-    const state = { ...createInitialRadarState(), people, query: 'relay.example' };
+  it('filters people by name, NIP-05, npub and what they posted', () => {
+    for (const query of ['alice', 'alice@example', 'npub1alice']) {
+      expect(visiblePeople({ ...createInitialRadarState(), people, query }).map((person) => person.name)).toEqual(['Alice']);
+    }
+    expect(visiblePeople({ ...createInitialRadarState(), people, query: 'new' }).map((person) => person.name)).toEqual(['Bob']);
+    expect(visiblePeople({ ...createInitialRadarState(), people, query: 'nothing' })).toEqual([]);
+  });
 
-    expect(visiblePeople(state)).toHaveLength(1);
-    expect(visiblePeople(state)[0]!.name).toBe('Alice');
+  it('puts the most recently active first, and people with no notes last', () => {
+    const quiet = { ...people[0]!, pubkey: 'c'.repeat(64), name: 'Quiet', recent: [] };
+    const state = { ...createInitialRadarState(), people: [quiet, people[0]!, { ...people[1]!, recent: [{ ...people[1]!.recent[0]!, createdAt: 5 }] }] };
+    expect(visiblePeople(state).map((person) => person.name)).toEqual(['Bob', 'Alice', 'Quiet']);
   });
 
   it('selects the requested person or first visible person', () => {
@@ -87,11 +100,15 @@ describe('people radar store (pure helpers)', () => {
     expect(selectedPerson(state)?.name).toBe('Bob');
   });
 
-  it('counts relationship statuses', () => {
-    const counts = relationshipCounts(people);
+  it('summarizes how many people there are and how many posted recently', () => {
+    expect(radarSummary([...people, { ...people[0]!, pubkey: 'c'.repeat(64), recent: [] }])).toEqual({ people: 3, active: 2 });
+  });
 
-    expect(counts.following).toBe(1);
-    expect(counts.pinned).toBe(1);
+  it('says how long ago in short words', () => {
+    expect(timeAgo(1_000, 1_030)).toBe('just now');
+    expect(timeAgo(1_000, 1_600)).toBe('10m ago');
+    expect(timeAgo(0, 7_200)).toBe('2h ago');
+    expect(timeAgo(0, 172_800)).toBe('2d ago');
   });
 
   it('returns latest activity by timestamp', () => {
@@ -185,14 +202,61 @@ describe('people radar store load() outbox gating', () => {
     expect(kinds).toContain(1);
   });
 
-  it('still seeds relayHint onto people for display/search', async () => {
+  it('names a person from the newest kind 0, and uses the npub when there is none', async () => {
     installShell(true);
+    const metadata = (id: string, createdAt: number, content: object) => ({
+      event: { id, kind: 0, pubkey: 'f1', created_at: createdAt, tags: [], content: JSON.stringify(content), sig: 'sig' },
+    });
+    mockOutboxQuery.mockImplementation(async (filter) => {
+      const f = Array.isArray(filter) ? filter[0] : filter;
+      if (!(f as { kinds?: number[] })?.kinds?.includes(0)) return { events: [] };
+      return {
+        events: [
+          metadata('new', 20, { display_name: 'Felix', nip05: 'felix@example.com', picture: 'https://media.example/felix.png' }),
+          metadata('old', 10, { name: 'Old Felix' }),
+        ],
+      };
+    });
 
     const store = createRadarStore();
     store.load();
-    await vi.waitFor(() => expect(mockOutboxQuery).toHaveBeenCalled());
+    await vi.waitFor(() => expect(store.state.loading).toBe(false));
+    await vi.waitFor(() => {
+      const nameless = store.state.people.find((p) => p.pubkey === 'f2');
+      expect(nameless?.named).toBe(false);
+      expect(nameless?.name).toMatch(/^npub1f2/);
+    });
+    expect(store.state.people.find((p) => p.pubkey === 'f1')).toMatchObject({
+      name: 'Felix',
+      named: true,
+      handle: 'felix@example.com',
+      picture: 'https://media.example/felix.png',
+    });
+  });
 
-    const follow = store.state.people.find((p) => p.pubkey === 'f1');
-    expect(follow?.relayHint).toBe('wss://relay.example');
+  it('keeps everyone from a long follow list, with room for their notes in the query', async () => {
+    installShell(true);
+    const follows = Array.from({ length: 200 }, (_, index) => `follow-${index}`);
+    vi.mocked(identity.getFollows).mockResolvedValue(follows);
+
+    const store = createRadarStore();
+    store.load();
+    await vi.waitFor(() => expect(mockOutboxQuery).toHaveBeenCalledTimes(2));
+    expect(store.state.people).toHaveLength(201);
+    const notes = mockOutboxQuery.mock.calls.map((c) => c[0] as { kinds?: number[]; authors?: string[]; limit?: number })
+      .find((f) => f.kinds?.includes(1));
+    expect(notes?.authors).toHaveLength(201);
+    expect(notes?.limit).toBe(1_608);
+  });
+
+  it('still lists people when the outbox query fails', async () => {
+    installShell(true);
+    mockOutboxQuery.mockRejectedValue(new Error('no relays'));
+
+    const store = createRadarStore();
+    store.load();
+    await vi.waitFor(() => expect(store.state.loading).toBe(false));
+    expect(store.state.people.map((p) => p.pubkey).sort()).toEqual(['f1', 'f2', 'self']);
+    expect(store.state.error).toBeNull();
   });
 });
